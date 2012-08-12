@@ -60,17 +60,36 @@ typedef enum ring_buff_err
 	RING_BUFF_ERR_PERM
 } ring_buff_err_t;
 
+/**
+ * Watermark levels.
+ */
+typedef enum ring_buff_wm_level
+{
+	/** Low watermark */
+	ring_buff_wm_low,
+	/** High watermark */
+	ring_buff_wm_high
+} ring_buff_wm_level_t;
+
 /** Ring buffer handle. */
 typedef void* ring_buff_handle_t;
 /**
  * Notification function type. Ring buffer client has to implement one,
  * if notification mechanism is used.
- * @param handle Ring buffer handle
- * @param buff Notified data buffer
- * @param buff Notified data buffer size
- * @return RING_BUFF_ERR_OK if everything was OK, or error if ring buffer client detected some problem
+ * @param handle Ring buffer handle.
+ * @param buff Notified data buffer.
+ * @param buff Notified data buffer size.
+ * @return RING_BUFF_ERR_OK if everything was OK, or error if ring buffer client detected some problem.
  */
 typedef ring_buff_err_t (*ring_buff_notify_t) (ring_buff_handle_t handle, void* buff, uint32_t size);
+/**
+ * Callback which is used to notify the upper layers that buffer fullness is on one of
+ * watermark values. User has to set watermark levels AND callback to use watermark mechanism.
+ * @param handle Ring buffer handle.
+ * @param level Watermark which is hit.
+ * @return RING_BUFF_ERR_OK if everything was OK, or error if ring buffer client detected some problem.
+ */
+typedef ring_buff_err_t (*ring_buff_wm_cb_t) (ring_buff_handle_t handle, ring_buff_wm_level_t level);
 
 /**
  * Ring buffer attribute structure. It is used when ring buffer is created.
@@ -92,6 +111,19 @@ typedef struct ring_buff_attr
 	 * NOTE: This function is called from the same thread from which data commit is done.
 	 */
 	ring_buff_notify_t notify_func;
+	/**
+	 * Low watermark value in bytes. It has to be between zero and wm_high.
+	 */
+	uint32_t wm_low;
+	/**
+	 * High watermark value in bytes. It has to be less than buffer size.
+	 */
+	uint32_t wm_high;
+	/**
+	 * Watermark callback. It is called whenever buffer fullness gets under wm_low,
+	 * or whenever it gets over wm_high. It is called ONLY during the fullness transition.
+	 */
+	ring_buff_wm_cb_t wm_cb;
 } ring_buff_attr_t;
 
 /**
@@ -103,7 +135,7 @@ typedef struct ring_buff_attr
  * ring buffer operations.
  * @return RING_BUFF_ERR_OK if everything was OK, or error if there was some problem.
  */
-ring_buff_err_t ring_buff_create(ring_buff_attr_t* attr, ring_buff_handle_t* handle);
+ring_buff_err_t ring_buff_create(ring_buff_attr_t *attr, ring_buff_handle_t *handle);
 /**
  * Ring buffer destructor function. This function must be called, so that all resources
  * allocated on ring buffer construction are freed.
@@ -119,7 +151,7 @@ ring_buff_err_t ring_buff_destroy(ring_buff_handle_t handle);
  * @param size Requested buffer size in bytes.
  * @return RING_BUFF_ERR_OK if everything was OK, or error if there was some problem.
  */
-ring_buff_err_t ring_buff_reserve(ring_buff_handle_t handle, void** buff, uint32_t size);
+ring_buff_err_t ring_buff_reserve(ring_buff_handle_t handle, void **buff, uint32_t size);
 /**
  * Commits written data. After this function is called, data is available for reading.
  * @param handle Ring buffer handle.
@@ -127,7 +159,7 @@ ring_buff_err_t ring_buff_reserve(ring_buff_handle_t handle, void** buff, uint32
  * @param size Committed data size in bytes.
  * @return RING_BUFF_ERR_OK if everything was OK, or error if there was some problem.
  */
-ring_buff_err_t ring_buff_commit(ring_buff_handle_t handle, void* buff, uint32_t size);
+ring_buff_err_t ring_buff_commit(ring_buff_handle_t handle, void *buff, uint32_t size);
 /**
  * Frees ring buffer chunk, so that it can be used for writing.
  * @param handle Ring buffer handle.
@@ -135,7 +167,7 @@ ring_buff_err_t ring_buff_commit(ring_buff_handle_t handle, void* buff, uint32_t
  * @param size Chunk length that should be freed.
  * @return RING_BUFF_ERR_OK if everything was OK, or error if there was some problem.
  */
-ring_buff_err_t ring_buff_free(ring_buff_handle_t handle, void* buff, uint32_t size);
+ring_buff_err_t ring_buff_free(ring_buff_handle_t handle, void *buff, uint32_t size);
 /**
  * Reads out requested size of data. Data should be additionally freed with "ring_buff_free".
  * Read mechanism should NOT be used together with the notify mechanism.
@@ -144,7 +176,7 @@ ring_buff_err_t ring_buff_free(ring_buff_handle_t handle, void* buff, uint32_t s
  * @param size Data size that should be read.
  * @return RING_BUFF_ERR_OK if everything was OK, or error if there was some problem.
  */
-ring_buff_err_t ring_buff_read(ring_buff_handle_t handle, void** buff, uint32_t size, uint32_t *read);
+ring_buff_err_t ring_buff_read(ring_buff_handle_t handle, void **buff, uint32_t size, uint32_t *read);
 /**
  * This function can be used when the notify mechanism is used. Calling this function will result
  * with forced call to the notify function.
@@ -166,6 +198,13 @@ ring_buff_err_t ring_buff_cancel(ring_buff_handle_t handle);
  * @return RING_BUFF_ERR_OK if everything was OK, or error if there was some problem.
  */
 ring_buff_err_t ring_buff_stop(ring_buff_handle_t handle);
+/**
+ * Resumes stopped/canceled buffer. Ring buffer will behave as it was just created
+ * (offsets and accumulation will be reseted to zero).
+ * @param handle Ring buffer handle.
+ * @return RING_BUFF_ERR_OK if everything was OK, or error if there was some problem.
+ */
+ring_buff_err_t ring_buff_resume(ring_buff_handle_t handle);
 /**
  * Convenience function that prints out 'human readable' ring buffer error description.
  * @param err Error.

@@ -63,11 +63,19 @@ typedef struct ring_buff_obj
 	uint32_t accumulate;
 	/** Notify callback, called whenever window is filled with data and available for consuming */
 	ring_buff_notify_t notify_func;
+	/** Low watermark value in bytes. */
+	uint32_t wm_low;
+	/** High watermark value in bytes. */
+	uint32_t wm_high;
+	/** Watermark callback. */
+	ring_buff_wm_cb_t wm_cb;
+	/** The last watermark level notified */
+	ring_buff_wm_level_t last_level;
 	/** Read pointer (available data start) */
 	uint8_t *read;
 	/** Write pointer (free memory start) */
 	uint8_t *write;
-	/** Accumulation window pointer (it does not have info about wrapped data) */
+	/** Accumulation window pointer (it does not have info about the wrapped data) */
 	uint8_t *acc;
 	/**
 	 * End of Data pointer. Used in reading mode. It marks last byte available for
@@ -85,6 +93,30 @@ typedef struct ring_buff_obj
 	/** Write semaphore */
 	ring_buff_binary_sem_t write_sem;
 } ring_buff_obj_t;
+
+/**
+ * Internal function which checks weather the buffer is in expected state.
+ * It is internal function, and expects that buffer context is already acquired by the caller.
+ * @param obj Valid buffer object.
+ * @param states States to check against (use bitwise or to pass more than one).
+ * @return RING_BUFF_ERR_OK if buffer is in expected state, RING_BUFF_ERR_PERM otherwise.
+ */
+static ring_buff_err_t ring_buff_check_state(ring_buff_obj_t* obj, ring_buff_state_t states);
+/**
+ * Internal function which handles accumulation. It is used only if accumulation mechanism is
+ * used. Internally, it may call notify callback (if enough data is accumulated).
+ * @param obj Valid buffer object.
+ * @param added_size How much of data (in bytes) is added to the buffer.
+ * @return RING_BUFF_ERR_OK or error code returned by the callback.
+ */
+static ring_buff_err_t ring_buff_handle_acc(ring_buff_obj_t* obj, uint32_t added_size);
+/**
+ * Internal function which handles watermark. It is used only if watermark notification
+ * callback is set.
+ * @param obj Valid buffer object.
+ * @return RING_BUFF_ERR_OK or error code returned by the watermark callback.
+ */
+static ring_buff_err_t ring_buff_handle_wm(ring_buff_obj_t* obj);
 
 ring_buff_err_t ring_buff_create(ring_buff_attr_t* attr, ring_buff_handle_t* handle)
 {
@@ -105,6 +137,7 @@ ring_buff_err_t ring_buff_create(ring_buff_attr_t* attr, ring_buff_handle_t* han
 		err_code = RING_BUFF_ERR_NO_MEM;
 		goto done;
 	}
+	memset(obj, 0, sizeof(ring_buff_obj_t));
 	if(ring_buff_mutex_create(&(obj->lock)) != RING_BUFF_ERR_OK)
 	{
 		free(obj);
@@ -113,12 +146,26 @@ ring_buff_err_t ring_buff_create(ring_buff_attr_t* attr, ring_buff_handle_t* han
 	}
 	if(attr->accumulate > (attr->size / 2))
 	{
-		fprintf(stderr, "WARNING (%s): Accumulation set too high. It will be turned OFF!\n", __FUNCTION__);
+		fprintf(stderr, "WARNING (%s): Accumulation set too high. It will be turned OFF!\n", __func__);
 		obj->accumulate = 0;
 	}
 	else
 	{
 		obj->accumulate = attr->accumulate;
+	}
+	if(attr->wm_cb != NULL)
+	{
+		if(attr->wm_high > attr->size || attr->wm_low > attr->wm_high)
+		{
+			fprintf(stderr, "WARNING (%s): Watermark is not set properly. It will be turned OFF!\n", __func__);
+		}
+		else
+		{
+			obj->wm_cb = attr->wm_cb;
+			obj->wm_low = attr->wm_low;
+			obj->wm_high = attr->wm_high;
+			obj->last_level = ring_buff_wm_low;
+		}
 	}
 	obj->buff = attr->buff;
 	obj->size = attr->size;
@@ -136,22 +183,6 @@ ring_buff_err_t ring_buff_create(ring_buff_attr_t* attr, ring_buff_handle_t* han
 done:
 	*handle = obj;
 	return err_code;
-}
-
-/**
- * Internal function that checks weather the buffer is in expected state.
- * It is internal function, and expects that buffer context is already acquired by the caller.
- * @param handle Valid buffer handle.
- * @param states States to check against (use bitwise or to pass more than one).
- * @return RING_BUFF_ERR_OK if buffer is in expected state, RING_BUFF_ERR_PERM otherwise
- */
-static ring_buff_err_t ring_buff_check_state(ring_buff_obj_t* obj, ring_buff_state_t states)
-{
-	if((obj->state & states) == 0)
-	{
-		return RING_BUFF_ERR_PERM;
-	}
-	return RING_BUFF_ERR_OK;
 }
 
 ring_buff_err_t ring_buff_destroy(ring_buff_handle_t handle)
@@ -235,36 +266,6 @@ ring_buff_err_t ring_buff_reserve(ring_buff_handle_t handle, void** buff, uint32
 	return RING_BUFF_ERR_OK;
 }
 
-static ring_buff_err_t ring_buff_handle_acc(ring_buff_obj_t* obj, uint32_t added_size)
-{
-	void* buff = NULL;
-	uint32_t size;
-
-	ENTER_RING_BUFF_CONTEX(obj);
-	/* send notification if there is enough data accumulated, or we got to the end of buffer */
-	if(obj->acc + obj->acc_size > obj->buff + obj->size)
-	{
-		size = obj->acc_size - added_size;
-		buff = obj->acc;
-		obj->acc_size = added_size;
-
-		obj->acc = obj->buff;
-	}
-	else if(obj->acc_size >= obj->accumulate)
-	{
-		size = obj->acc_size - added_size;
-		buff = obj->acc;
-		obj->acc_size = added_size;
-		obj->acc += size;
-	}
-	LEAVE_RING_BUFF_CONTEX(obj);
-	if(buff)
-	{
-		return obj->notify_func(obj, buff, size);
-	}
-	return RING_BUFF_ERR_OK;
-}
-
 ring_buff_err_t ring_buff_commit(ring_buff_handle_t handle, void* buff, uint32_t size)
 {
 	ring_buff_obj_t* obj = GET_RING_BUFF_OBJ(handle);
@@ -279,6 +280,10 @@ ring_buff_err_t ring_buff_commit(ring_buff_handle_t handle, void* buff, uint32_t
 		return RING_BUFF_ERR_GENERAL;
 	}
 	LEAVE_RING_BUFF_CONTEX(obj);
+	if(obj->wm_cb != NULL)
+	{
+		ring_buff_handle_wm(obj);
+	}
 	/* in case of accumulation, leave buffer context and notify listener */
 	if(obj->accumulate && obj->notify_func)
 	{
@@ -306,6 +311,10 @@ ring_buff_err_t ring_buff_free(ring_buff_handle_t handle, void* buff, uint32_t s
 	obj->read = (uint8_t*)buff + size;
 	ring_buff_binary_sem_give(obj->write_sem);
 	LEAVE_RING_BUFF_CONTEX(obj);
+	if(obj->wm_cb != NULL)
+	{
+		return ring_buff_handle_wm(obj);
+	}
 
 	return RING_BUFF_ERR_OK;
 }
@@ -422,6 +431,27 @@ ring_buff_err_t ring_buff_stop(ring_buff_handle_t handle)
 	}
 	ENTER_RING_BUFF_CONTEX(obj);
 	obj->state = RING_BUFF_STATE_STOPPED;
+	ring_buff_binary_sem_give(obj->write_sem);
+	LEAVE_RING_BUFF_CONTEX(obj);
+	return RING_BUFF_ERR_OK;
+}
+
+ring_buff_err_t ring_buff_resume(ring_buff_handle_t handle)
+{
+	ring_buff_obj_t* obj = GET_RING_BUFF_OBJ(handle);
+
+	if(obj == NULL)
+	{
+		return RING_BUFF_ERR_GENERAL;
+	}
+	ENTER_RING_BUFF_CONTEX(obj);
+	obj->read = obj->buff;
+	obj->write = obj->buff;
+	obj->acc = obj->buff;
+	obj->eod = NULL;
+	obj->acc_size = 0;
+	obj->last_level = ring_buff_wm_low;
+	obj->state = RING_BUFF_STATE_ACTIVE;
 	LEAVE_RING_BUFF_CONTEX(obj);
 	return RING_BUFF_ERR_OK;
 }
@@ -452,4 +482,73 @@ void ring_buff_print_err(ring_buff_err_t err)
 		fprintf(stderr, "Unknown error code: %d.\n", err);
 		break;
 	}
+}
+
+
+static ring_buff_err_t ring_buff_check_state(ring_buff_obj_t* obj, ring_buff_state_t states)
+{
+	if((obj->state & states) == 0)
+	{
+		return RING_BUFF_ERR_PERM;
+	}
+
+	return RING_BUFF_ERR_OK;
+}
+
+
+static ring_buff_err_t ring_buff_handle_acc(ring_buff_obj_t* obj, uint32_t added_size)
+{
+	void* buff = NULL;
+	uint32_t size;
+
+	ENTER_RING_BUFF_CONTEX(obj);
+	/* send notification if there is enough data accumulated,
+	 * or we got to the end of the buffer */
+	if(obj->acc + obj->acc_size > obj->buff + obj->size)
+	{
+		size = obj->acc_size - added_size;
+		buff = obj->acc;
+		obj->acc_size = added_size;
+
+		obj->acc = obj->buff;
+	}
+	else if(obj->acc_size >= obj->accumulate)
+	{
+		size = obj->acc_size - added_size;
+		buff = obj->acc;
+		obj->acc_size = added_size;
+		obj->acc += size;
+	}
+	/* callback is executed out of ring buffer context */
+	LEAVE_RING_BUFF_CONTEX(obj);
+	if(buff)
+	{
+		return obj->notify_func(obj, buff, size);
+	}
+
+	return RING_BUFF_ERR_OK;
+}
+
+static ring_buff_err_t ring_buff_handle_wm(ring_buff_obj_t* obj)
+{
+	uint8_t notify = 0;
+
+	ENTER_RING_BUFF_CONTEX(obj);
+	if((obj->acc_size > obj->wm_high) && obj->last_level == ring_buff_wm_low)
+	{
+		obj->last_level = ring_buff_wm_high;
+		notify = 1;
+	}
+	else if((obj->acc_size < obj->wm_low) && obj->last_level == ring_buff_wm_high)
+	{
+		obj->last_level = ring_buff_wm_low;
+		notify = 1;
+	}
+	LEAVE_RING_BUFF_CONTEX(obj);
+	if(notify != 0)
+	{
+		return obj->wm_cb(obj, obj->last_level);
+	}
+
+	return RING_BUFF_ERR_OK;
 }
