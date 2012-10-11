@@ -431,6 +431,7 @@ ring_buff_err_t ring_buff_stop(ring_buff_handle_t handle)
 	}
 	ENTER_RING_BUFF_CONTEX(obj);
 	obj->state = RING_BUFF_STATE_STOPPED;
+	ring_buff_binary_sem_give(obj->read_sem);
 	ring_buff_binary_sem_give(obj->write_sem);
 	LEAVE_RING_BUFF_CONTEX(obj);
 	return RING_BUFF_ERR_OK;
@@ -453,6 +454,7 @@ ring_buff_err_t ring_buff_resume(ring_buff_handle_t handle)
 	obj->last_level = ring_buff_wm_low;
 	obj->state = RING_BUFF_STATE_ACTIVE;
 	LEAVE_RING_BUFF_CONTEX(obj);
+
 	return RING_BUFF_ERR_OK;
 }
 
