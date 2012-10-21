@@ -46,6 +46,8 @@ typedef enum ring_buff_err
 {
 	/** No error */
 	RING_BUFF_ERR_OK = 0,
+	/** No error */
+	RING_BUFF_ERR_BAD_ARG,
 	/** General error */
 	RING_BUFF_ERR_GENERAL,
 	/** Out of memory error */

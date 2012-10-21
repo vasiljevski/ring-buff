@@ -36,11 +36,13 @@
 #include "ring_buff.h"
 #include "ring_buff_osal.h"
 
-/* #define RING_BUFF_DBG_MSG */
+#if 0
+#define RING_BUFF_DBG_MSG
+#endif
 
 #define GET_RING_BUFF_OBJ(handle) ((ring_buff_obj_t*)handle)
-#define ENTER_RING_BUFF_CONTEX(handle) (ring_buff_mutex_lock(handle->lock))
-#define LEAVE_RING_BUFF_CONTEX(handle) (ring_buff_mutex_unlock(handle->lock))
+#define ENTER_RING_BUFF_CONTEXT(handle) (ring_buff_mutex_lock(handle->lock))
+#define LEAVE_RING_BUFF_CONTEXT(handle) (ring_buff_mutex_unlock(handle->lock))
 
 /**
  * Buffer states. Buffer can be ONLY in ONE of possible states, but states are
@@ -121,9 +123,9 @@ static ring_buff_err_t ring_buff_handle_wm(ring_buff_obj_t* obj);
 ring_buff_err_t ring_buff_create(ring_buff_attr_t* attr, ring_buff_handle_t* handle)
 {
 	ring_buff_obj_t* obj = NULL;
-	ring_buff_err_t err_code = RING_BUFF_ERR_GENERAL;
+	ring_buff_err_t err_code = RING_BUFF_ERR_BAD_ARG;
 
-	if(attr == NULL)
+	if(attr == NULL || handle == NULL)
 	{
 		goto done;
 	}
@@ -181,7 +183,10 @@ ring_buff_err_t ring_buff_create(ring_buff_attr_t* attr, ring_buff_handle_t* han
 	err_code = RING_BUFF_ERR_OK;
 
 done:
-	*handle = obj;
+	if(handle != NULL)
+	{
+		*handle = obj;
+	}
 	return err_code;
 }
 
@@ -205,14 +210,18 @@ ring_buff_err_t ring_buff_reserve(ring_buff_handle_t handle, void** buff, uint32
 {
 	ring_buff_obj_t* obj = GET_RING_BUFF_OBJ(handle);
 
+	if(handle == NULL || buff == NULL)
+	{
+		return RING_BUFF_ERR_BAD_ARG;
+	}
 	if(size > obj->size)
 	{
 		return RING_BUFF_ERR_SIZE;
 	}
-	ENTER_RING_BUFF_CONTEX(obj);
+	ENTER_RING_BUFF_CONTEXT(obj);
 	if(ring_buff_check_state(obj, RING_BUFF_STATE_ACTIVE))
 	{
-		LEAVE_RING_BUFF_CONTEX(obj);
+		LEAVE_RING_BUFF_CONTEXT(obj);
 		return RING_BUFF_ERR_PERM;
 	}
 	/* simple situation, there is enough space left till the end of buffer */
@@ -222,13 +231,13 @@ ring_buff_err_t ring_buff_reserve(ring_buff_handle_t handle, void** buff, uint32
 		while(obj->write < obj->read && obj->write + size >= obj->read)
 		{
 			/* unlock context */
-			LEAVE_RING_BUFF_CONTEX(obj);
+			LEAVE_RING_BUFF_CONTEXT(obj);
 			/* wait for some free chunk */
 			ring_buff_binary_sem_take(obj->write_sem);
-			ENTER_RING_BUFF_CONTEX(obj);
+			ENTER_RING_BUFF_CONTEXT(obj);
 			if(ring_buff_check_state(obj, RING_BUFF_STATE_ACTIVE))
 			{
-				LEAVE_RING_BUFF_CONTEX(obj);
+				LEAVE_RING_BUFF_CONTEXT(obj);
 				return RING_BUFF_ERR_PERM;
 			}
 		}
@@ -247,12 +256,12 @@ ring_buff_err_t ring_buff_reserve(ring_buff_handle_t handle, void** buff, uint32
 #ifdef RING_BUFF_DBG_MSG
 			printf("RESERVE: Waiting start free buffer (%d) (%p) RD %p ACC %p WR %p \n", size, obj->buff, obj->read, obj->acc, obj->write);
 #endif
-			LEAVE_RING_BUFF_CONTEX(obj);
+			LEAVE_RING_BUFF_CONTEXT(obj);
 			ring_buff_binary_sem_take(obj->write_sem);
-			ENTER_RING_BUFF_CONTEX(obj);
+			ENTER_RING_BUFF_CONTEXT(obj);
 			if(ring_buff_check_state(obj, RING_BUFF_STATE_ACTIVE))
 			{
-				LEAVE_RING_BUFF_CONTEX(obj);
+				LEAVE_RING_BUFF_CONTEXT(obj);
 				return RING_BUFF_ERR_PERM;
 			}
 		}
@@ -261,7 +270,7 @@ ring_buff_err_t ring_buff_reserve(ring_buff_handle_t handle, void** buff, uint32
 		*buff = obj->buff;
 		obj->write = obj->buff + size;
 	}
-	LEAVE_RING_BUFF_CONTEX(obj);
+	LEAVE_RING_BUFF_CONTEXT(obj);
 
 	return RING_BUFF_ERR_OK;
 }
@@ -270,16 +279,20 @@ ring_buff_err_t ring_buff_commit(ring_buff_handle_t handle, void* buff, uint32_t
 {
 	ring_buff_obj_t* obj = GET_RING_BUFF_OBJ(handle);
 
-	ENTER_RING_BUFF_CONTEX(obj);
+	if(handle == NULL || buff == NULL)
+	{
+		return RING_BUFF_ERR_BAD_ARG;
+	}
 
+	ENTER_RING_BUFF_CONTEXT(obj);
 	obj->acc_size += size;
 	/* Sanity check. This may be removed. */
 	if(obj->acc_size > obj->size)
 	{
-		LEAVE_RING_BUFF_CONTEX(obj);
-		return RING_BUFF_ERR_GENERAL;
+		LEAVE_RING_BUFF_CONTEXT(obj);
+		return RING_BUFF_ERR_SIZE;
 	}
-	LEAVE_RING_BUFF_CONTEX(obj);
+	LEAVE_RING_BUFF_CONTEXT(obj);
 	if(obj->wm_cb != NULL)
 	{
 		ring_buff_handle_wm(obj);
@@ -304,13 +317,13 @@ ring_buff_err_t ring_buff_free(ring_buff_handle_t handle, void* buff, uint32_t s
 
 	if(obj == NULL)
 	{
-		return RING_BUFF_ERR_GENERAL;
+		return RING_BUFF_ERR_BAD_ARG;
 	}
-	ENTER_RING_BUFF_CONTEX(obj);
+	ENTER_RING_BUFF_CONTEXT(obj);
 	/* Free will just update read pointer. It is up to the user to call it in proper order. */
 	obj->read = (uint8_t*)buff + size;
 	ring_buff_binary_sem_give(obj->write_sem);
-	LEAVE_RING_BUFF_CONTEX(obj);
+	LEAVE_RING_BUFF_CONTEXT(obj);
 	if(obj->wm_cb != NULL)
 	{
 		return ring_buff_handle_wm(obj);
@@ -326,22 +339,22 @@ ring_buff_err_t ring_buff_read(ring_buff_handle_t handle, void** buff, uint32_t 
 
 	if(handle == NULL || buff == NULL || size > obj->size || read == NULL)
 	{
-		return RING_BUFF_ERR_GENERAL;
+		return RING_BUFF_ERR_BAD_ARG;
 	}
-	ENTER_RING_BUFF_CONTEX(obj);
+	ENTER_RING_BUFF_CONTEXT(obj);
 	/* make sure that we have enough data available */
 	while(size > obj->acc_size && obj->state != RING_BUFF_STATE_STOPPED)
 	{
 #ifdef RING_BUFF_DBG_MSG
 		printf("READ: Waiting read buffer for %u ACC: %d\n", size, obj->acc_size);
 #endif
-		LEAVE_RING_BUFF_CONTEX(obj);
+		LEAVE_RING_BUFF_CONTEXT(obj);
 		ring_buff_binary_sem_take(obj->read_sem);
-		ENTER_RING_BUFF_CONTEX(obj);
+		ENTER_RING_BUFF_CONTEXT(obj);
 		/* We can read, even if buffer has been stopped */
 		if(ring_buff_check_state(obj, RING_BUFF_STATE_ACTIVE | RING_BUFF_STATE_STOPPED))
 		{
-			LEAVE_RING_BUFF_CONTEX(obj);
+			LEAVE_RING_BUFF_CONTEXT(obj);
 			return RING_BUFF_ERR_PERM;
 		}
 	}
@@ -382,7 +395,7 @@ ring_buff_err_t ring_buff_read(ring_buff_handle_t handle, void** buff, uint32_t 
 		obj->acc += size;
 		*read = size;
 	}
-	LEAVE_RING_BUFF_CONTEX(obj);
+	LEAVE_RING_BUFF_CONTEXT(obj);
 
 	return err;
 }
@@ -391,6 +404,10 @@ ring_buff_err_t ring_buff_flush(ring_buff_handle_t handle)
 {
 	ring_buff_obj_t* obj = GET_RING_BUFF_OBJ(handle);
 
+	if(handle == NULL)
+	{
+		return RING_BUFF_ERR_BAD_ARG;
+	}
 	/* cannot be used if accumulation is not set */
 	if(!obj->accumulate && !obj->notify_func)
 	{
@@ -411,13 +428,13 @@ ring_buff_err_t ring_buff_cancel(ring_buff_handle_t handle)
 
 	if(obj == NULL)
 	{
-		return RING_BUFF_ERR_GENERAL;
+		return RING_BUFF_ERR_BAD_ARG;
 	}
-	ENTER_RING_BUFF_CONTEX(obj);
+	ENTER_RING_BUFF_CONTEXT(obj);
 	obj->state = RING_BUFF_STATE_CANCELED;
 	ring_buff_binary_sem_give(obj->read_sem);
 	ring_buff_binary_sem_give(obj->write_sem);
-	LEAVE_RING_BUFF_CONTEX(obj);
+	LEAVE_RING_BUFF_CONTEXT(obj);
 	return RING_BUFF_ERR_OK;
 }
 
@@ -427,13 +444,13 @@ ring_buff_err_t ring_buff_stop(ring_buff_handle_t handle)
 
 	if(obj == NULL)
 	{
-		return RING_BUFF_ERR_GENERAL;
+		return RING_BUFF_ERR_BAD_ARG;
 	}
-	ENTER_RING_BUFF_CONTEX(obj);
+	ENTER_RING_BUFF_CONTEXT(obj);
 	obj->state = RING_BUFF_STATE_STOPPED;
 	ring_buff_binary_sem_give(obj->read_sem);
 	ring_buff_binary_sem_give(obj->write_sem);
-	LEAVE_RING_BUFF_CONTEX(obj);
+	LEAVE_RING_BUFF_CONTEXT(obj);
 	return RING_BUFF_ERR_OK;
 }
 
@@ -443,9 +460,9 @@ ring_buff_err_t ring_buff_resume(ring_buff_handle_t handle)
 
 	if(obj == NULL)
 	{
-		return RING_BUFF_ERR_GENERAL;
+		return RING_BUFF_ERR_BAD_ARG;
 	}
-	ENTER_RING_BUFF_CONTEX(obj);
+	ENTER_RING_BUFF_CONTEXT(obj);
 	obj->read = obj->buff;
 	obj->write = obj->buff;
 	obj->acc = obj->buff;
@@ -453,7 +470,7 @@ ring_buff_err_t ring_buff_resume(ring_buff_handle_t handle)
 	obj->acc_size = 0;
 	obj->last_level = ring_buff_wm_low;
 	obj->state = RING_BUFF_STATE_ACTIVE;
-	LEAVE_RING_BUFF_CONTEX(obj);
+	LEAVE_RING_BUFF_CONTEXT(obj);
 
 	return RING_BUFF_ERR_OK;
 }
@@ -503,7 +520,7 @@ static ring_buff_err_t ring_buff_handle_acc(ring_buff_obj_t* obj, uint32_t added
 	void* buff = NULL;
 	uint32_t size;
 
-	ENTER_RING_BUFF_CONTEX(obj);
+	ENTER_RING_BUFF_CONTEXT(obj);
 	/* send notification if there is enough data accumulated,
 	 * or we got to the end of the buffer */
 	if(obj->acc + obj->acc_size > obj->buff + obj->size)
@@ -522,7 +539,7 @@ static ring_buff_err_t ring_buff_handle_acc(ring_buff_obj_t* obj, uint32_t added
 		obj->acc += size;
 	}
 	/* callback is executed out of ring buffer context */
-	LEAVE_RING_BUFF_CONTEX(obj);
+	LEAVE_RING_BUFF_CONTEXT(obj);
 	if(buff)
 	{
 		return obj->notify_func(obj, buff, size);
@@ -535,7 +552,7 @@ static ring_buff_err_t ring_buff_handle_wm(ring_buff_obj_t* obj)
 {
 	uint8_t notify = 0;
 
-	ENTER_RING_BUFF_CONTEX(obj);
+	ENTER_RING_BUFF_CONTEXT(obj);
 	if((obj->acc_size > obj->wm_high) && obj->last_level == ring_buff_wm_low)
 	{
 		obj->last_level = ring_buff_wm_high;
@@ -546,7 +563,7 @@ static ring_buff_err_t ring_buff_handle_wm(ring_buff_obj_t* obj)
 		obj->last_level = ring_buff_wm_low;
 		notify = 1;
 	}
-	LEAVE_RING_BUFF_CONTEX(obj);
+	LEAVE_RING_BUFF_CONTEXT(obj);
 	if(notify != 0)
 	{
 		return obj->wm_cb(obj, obj->last_level);
